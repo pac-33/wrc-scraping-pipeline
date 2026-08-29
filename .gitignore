@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environment / secrets
+.env
+
+# Scrapy
+.scrapy/
+httpcache/
+
+# Dagster
+.dagster_home/
+tmp*/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
