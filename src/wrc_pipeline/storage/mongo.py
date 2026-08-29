@@ -129,6 +129,36 @@ class MetadataRepository:
         return self._collection.count_documents(query)
 
 
+class CuratedRepository:
+    """Repository over the curated collection written by the transformation.
+
+    Mirrors the landing repository's idempotency model: ``source_content_hash``
+    records which landing content a curated record was derived from, so an
+    unchanged source short-circuits re-transformation.
+    """
+
+    def __init__(self, collection: Collection[Document]) -> None:
+        self._collection = collection
+
+    def get_source_hash(self, identifier: str) -> str | None:
+        doc = self._collection.find_one({"_id": identifier}, projection={"source_content_hash": 1})
+        return doc.get("source_content_hash") if doc else None
+
+    def upsert(self, identifier: str, doc: Document, first_seen_at: datetime) -> bool:
+        update = {
+            "$set": doc,
+            "$setOnInsert": {"first_transformed_at": first_seen_at},
+        }
+        try:
+            result = self._collection.update_one({"_id": identifier}, update, upsert=True)
+        except DuplicateKeyError:
+            result = self._collection.update_one({"_id": identifier}, update, upsert=True)
+        return result.upserted_id is not None
+
+    def count(self) -> int:
+        return self._collection.count_documents({})
+
+
 class RunReportStore:
     def __init__(self, collection: Collection[Document]) -> None:
         self._collection = collection
