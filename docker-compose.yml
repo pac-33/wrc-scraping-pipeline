@@ -5,7 +5,9 @@ services:
     image: mongo:8.0.13
     restart: unless-stopped
     ports:
-      - "27017:27017"
+      # Host ports are env-configurable so the stack coexists with other
+      # local services (e.g. a native mongod already bound to 27017).
+      - "${WRC_MONGO_HOST_PORT:-27017}:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?set in .env}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?set in .env}
@@ -24,8 +26,8 @@ services:
     restart: unless-stopped
     command: server /data --console-address ":9001"
     ports:
-      - "9000:9000" # S3 API
-      - "9001:9001" # web console
+      - "${WRC_MINIO_HOST_PORT:-9000}:9000" # S3 API
+      - "${WRC_MINIO_CONSOLE_HOST_PORT:-9001}:9001" # web console
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set in .env}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set in .env}

@@ -62,7 +62,9 @@ def setup_logging(level: str = "INFO", log_format: Literal["json", "console"] = 
                         *traceback_processors,
                         renderer,
                     ],
-                    "foreign_pre_chain": _SHARED_PROCESSORS,
+                    # ExtraAdder lifts `extra={...}` fields from stdlib log
+                    # calls (e.g. spider.logger) into the JSON event.
+                    "foreign_pre_chain": [*_SHARED_PROCESSORS, structlog.stdlib.ExtraAdder()],
                 },
             },
             "handlers": {

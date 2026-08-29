@@ -39,6 +39,22 @@ def test_third_party_stdlib_logs_render_as_json_too(capsys: pytest.CaptureFixtur
     assert event["logger"] == "scrapy.core.engine"
 
 
+def test_extra_fields_from_stdlib_loggers_reach_the_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """spider.logger.info("event", extra={...}) is a stdlib call — ExtraAdder
+    must lift those fields into the rendered JSON event."""
+    setup_logging(level="INFO", log_format="json")
+    logging.getLogger("decisions").info(
+        "partition_search_started", extra={"partition": "2025-06", "total": 192}
+    )
+
+    line = capsys.readouterr().out.strip().splitlines()[-1]
+    event = json.loads(line)
+    assert event["partition"] == "2025-06"
+    assert event["total"] == 192
+
+
 def test_noisy_libraries_are_quieted(capsys: pytest.CaptureFixture[str]) -> None:
     setup_logging(level="INFO", log_format="json")
     logging.getLogger("pymongo.topology").info("heartbeat noise")
