@@ -1,0 +1,29 @@
+# Dagster instance config for the docker compose deployment.
+
+storage:
+  postgres:
+    postgres_db:
+      hostname: dagster-postgres
+      username:
+        env: DAGSTER_POSTGRES_USER
+      password:
+        env: DAGSTER_POSTGRES_PASSWORD
+      db_name:
+        env: DAGSTER_POSTGRES_DB
+      port: 5432
+
+# One run at a time: a date-range backfill launches one run per monthly
+# partition, and each ingestion run is its own Scrapy process with its own
+# politeness budget. Serializing runs keeps the aggregate request rate on
+# workplacerelations.ie identical to a single polite crawler.
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: QueuedRunCoordinator
+  config:
+    max_concurrent_runs: 1
+
+run_monitoring:
+  enabled: true
+
+telemetry:
+  enabled: false
