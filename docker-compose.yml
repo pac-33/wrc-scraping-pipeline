@@ -1,0 +1,60 @@
+name: wrc-pipeline
+
+services:
+  mongodb:
+    image: mongo:8.0.13
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?set in .env}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?set in .env}
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      # `ping` is allowed pre-auth, so no credentials leak into the healthcheck.
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set in .env}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # One-shot bucket bootstrap; the server image bundles the mc client, so no
+  # separate (and separately-versioned) mc image is needed.
+  minio-init:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 \"$${MINIO_ROOT_USER}\" \"$${MINIO_ROOT_PASSWORD}\" &&
+      mc mb --ignore-existing local/$${WRC_LANDING_BUCKET:-wrc-landing} local/$${WRC_CURATED_BUCKET:-wrc-curated}
+      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set in .env}
+      WRC_LANDING_BUCKET: ${WRC_OBJECT_STORE__LANDING_BUCKET:-wrc-landing}
+      WRC_CURATED_BUCKET: ${WRC_OBJECT_STORE__CURATED_BUCKET:-wrc-curated}
+
+volumes:
+  mongo-data:
+  minio-data:
