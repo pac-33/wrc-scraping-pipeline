@@ -17,6 +17,7 @@ from typing import Any
 import dagster as dg
 
 from wrc_pipeline.config import get_settings
+from wrc_pipeline.logging import setup_logging
 from wrc_pipeline.transform.core import transform_range
 
 PARTITIONS_START_ENV = "WRC_PARTITIONS_START"
@@ -78,10 +79,10 @@ def transformed_decisions(context: dg.AssetExecutionContext) -> dg.MaterializeRe
     """The same month, transformed into the curated zone (in-process — no
     reactor involved, so no subprocess needed). Thin wrapper over the same
     ``transform_range`` the CLI uses."""
+    settings = get_settings()
+    setup_logging(settings.log_level, settings.log_format)
     start_date, end_date = partition_window_to_spider_args(context)
-    stats = transform_range(
-        date.fromisoformat(start_date), date.fromisoformat(end_date), get_settings()
-    )
+    stats = transform_range(date.fromisoformat(start_date), date.fromisoformat(end_date), settings)
     metadata: dict[str, Any] = {**stats.as_dict()}
     if stats.failures:
         metadata["failure_sample"] = str(stats.failures[:5])
