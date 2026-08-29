@@ -57,6 +57,76 @@ services:
       WRC_LANDING_BUCKET: ${WRC_OBJECT_STORE__LANDING_BUCKET:-wrc-landing}
       WRC_CURATED_BUCKET: ${WRC_OBJECT_STORE__CURATED_BUCKET:-wrc-curated}
 
+  # --- Dagster stack (opt-in): docker compose --profile dagster up -d --------
+  dagster-postgres:
+    image: postgres:16.9-alpine
+    profiles: ["dagster"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DAGSTER_POSTGRES_USER:-dagster}
+      POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: ${DAGSTER_POSTGRES_DB:-dagster}
+    volumes:
+      - dagster-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DAGSTER_POSTGRES_USER:-dagster}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Code location gRPC server; runs also execute here (default run launcher),
+  # so this container needs the app env (Mongo/MinIO via the compose network).
+  wrc-code:
+    build: .
+    profiles: ["dagster"]
+    restart: unless-stopped
+    command: dagster code-server start -h 0.0.0.0 -p 4000 -m wrc_pipeline.orchestration.definitions
+    environment: &wrc_app_env
+      WRC_MONGO__URI: mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongodb:27017
+      WRC_MONGO__DATABASE: ${WRC_MONGO__DATABASE:-wrc}
+      WRC_OBJECT_STORE__ENDPOINT_URL: http://minio:9000
+      WRC_OBJECT_STORE__ACCESS_KEY: ${MINIO_ROOT_USER}
+      WRC_OBJECT_STORE__SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      WRC_SCRAPER__CONTACT_EMAIL: ${WRC_SCRAPER__CONTACT_EMAIL:?set in .env}
+      WRC_PARTITIONS_START: ${WRC_PARTITIONS_START:-2024-01-01}
+      DAGSTER_POSTGRES_USER: ${DAGSTER_POSTGRES_USER:-dagster}
+      DAGSTER_POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD:?set in .env}
+      DAGSTER_POSTGRES_DB: ${DAGSTER_POSTGRES_DB:-dagster}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      dagster-postgres:
+        condition: service_healthy
+
+  dagster-webserver:
+    build: .
+    profiles: ["dagster"]
+    restart: unless-stopped
+    command: dagster-webserver -h 0.0.0.0 -p 3000 -w /opt/dagster/home/workspace.yaml
+    ports:
+      - "${WRC_DAGSTER_HOST_PORT:-3000}:3000"
+    environment: *wrc_app_env
+    depends_on:
+      dagster-postgres:
+        condition: service_healthy
+      wrc-code:
+        condition: service_started
+
+  dagster-daemon:
+    build: .
+    profiles: ["dagster"]
+    restart: unless-stopped
+    command: dagster-daemon run -w /opt/dagster/home/workspace.yaml
+    environment: *wrc_app_env
+    depends_on:
+      dagster-postgres:
+        condition: service_healthy
+      wrc-code:
+        condition: service_started
+
 volumes:
   mongo-data:
   minio-data:
+  dagster-postgres-data:
