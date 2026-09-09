@@ -26,7 +26,6 @@ def make_record(**overrides: object) -> DecisionRecord:
         "doc_kind": DocKind.HTML_PAGE,
         "file_path": "landing/body=15376/partition=2025-07/ADJ-00054658.html",
         "file_hash": "a" * 64,
-        "content_hash": "b" * 64,
         "content_type": "text/html; charset=utf-8",
         "file_size": 22056,
         "file_extension": ".html",
@@ -73,11 +72,11 @@ class TestUpsertIdempotency:
         self, repo: MetadataRepository, mongo_database: mongomock.Database
     ) -> None:
         repo.upsert_record(make_record())
-        repo.upsert_record(make_record(content_hash="c" * 64, file_hash="d" * 64))
+        repo.upsert_record(make_record(file_hash="d" * 64))
 
         doc = mongo_database["decisions_landing"].find_one({"_id": "ADJ-00054658"})
         assert doc is not None
-        assert doc["content_hash"] == "c" * 64
+        assert doc["file_hash"] == "d" * 64
 
     def test_duplicate_key_race_is_retried_once(self) -> None:
         collection = MagicMock()
@@ -110,17 +109,17 @@ class TestAsyncRepository:
             await async_repo.touch_unchanged(
                 "ADJ-00054658", "run-003", datetime(2025, 8, 3, tzinfo=UTC)
             )
-            return inserted, again, await async_repo.get_content_hash("ADJ-00054658")
+            return inserted, again, await async_repo.get_file_hash("ADJ-00054658")
 
         inserted, again, stored_hash = asyncio.run(scenario())
 
         assert (inserted, again) == (True, False)
-        assert stored_hash == "b" * 64
+        assert stored_hash == "a" * 64
         doc = mongo_database["decisions_landing"].find_one({"_id": "ADJ-00054658"})
         assert doc is not None
         assert doc["first_run_id"] == "run-001"
         assert doc["last_run_id"] == "run-003"
-        assert asyncio.run(async_repo.get_content_hash("missing")) is None
+        assert asyncio.run(async_repo.get_file_hash("missing")) is None
 
     def test_add_attachment_is_idempotent(
         self, async_repo: AsyncMetadataRepository, mongo_database: mongomock.Database
@@ -145,10 +144,10 @@ class TestAsyncRepository:
 
 
 class TestChangeDetection:
-    def test_get_content_hash_roundtrip(self, repo: MetadataRepository) -> None:
-        assert repo.get_content_hash("ADJ-00054658") is None
+    def test_get_file_hash_roundtrip(self, repo: MetadataRepository) -> None:
+        assert repo.get_file_hash("ADJ-00054658") is None
         repo.upsert_record(make_record())
-        assert repo.get_content_hash("ADJ-00054658") == "b" * 64
+        assert repo.get_file_hash("ADJ-00054658") == "a" * 64
 
     def test_touch_unchanged_updates_only_seen_markers(
         self, repo: MetadataRepository, mongo_database: mongomock.Database
@@ -159,7 +158,7 @@ class TestChangeDetection:
         doc = mongo_database["decisions_landing"].find_one({"_id": "ADJ-00054658"})
         assert doc is not None
         assert doc["last_run_id"] == "run-002"
-        assert doc["content_hash"] == "b" * 64
+        assert doc["file_hash"] == "a" * 64
 
 
 class TestAttachments:

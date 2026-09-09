@@ -68,22 +68,18 @@ class TestHashingPipeline:
         assert len(item.file_hash) == 64
         assert item.file_path == "landing/body=15376/partition=2025-06/ADJ-00053864.html"
 
-    def test_volatile_comment_changes_file_hash_but_not_content_hash(
-        self, spider: DecisionsSpider
-    ) -> None:
+    def test_volatile_comment_does_not_change_html_hash(self, spider: DecisionsSpider) -> None:
         pipeline = HashingPipeline()
         first = pipeline.process_item(make_document_item(HTML_V1), spider)
         refetch = pipeline.process_item(make_document_item(HTML_V1_REFETCH), spider)
 
-        assert first.file_hash != refetch.file_hash
-        assert first.content_hash == refetch.content_hash
+        assert first.file_hash == refetch.file_hash
 
     def test_pdf_attachment_fields(self, spider: DecisionsSpider) -> None:
         item = HashingPipeline().process_item(make_attachment_item(), spider)
 
         assert item.file_extension == ".pdf"
         assert item.content_type == "application/pdf"
-        assert item.content_hash == item.file_hash  # binary: no canonicalization
         assert item.file_path == "landing/body=1/partition=1999-12/EE47-1999__attachment_1.pdf"
 
 
@@ -136,6 +132,7 @@ class TestPersistencePipelineIdempotency:
         assert record is not None
         assert record["file_path"] == "landing/body=15376/partition=2025-06/ADJ-00053864.html"
         assert record["partition_key"] == "2025-06"
+        assert "content_hash" not in record
         stats = spider.crawler.stats
         assert stats.get_value("wrc/files_uploaded") == 1
         assert stats.get_value("wrc/records_inserted") == 1
