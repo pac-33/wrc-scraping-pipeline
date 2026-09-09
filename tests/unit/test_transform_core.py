@@ -6,7 +6,7 @@ import pytest
 from tests.conftest import load_fixture
 from wrc_pipeline.config import Settings
 from wrc_pipeline.constants import Body
-from wrc_pipeline.hashing import content_hash, file_hash
+from wrc_pipeline.hashing import file_hash
 from wrc_pipeline.transform.core import transform_range
 
 JUNE_PARTITION = datetime(2025, 6, 1, tzinfo=UTC)
@@ -36,8 +36,7 @@ def landing_record(
         "doc_url": f"https://www.workplacerelations.ie/en/cases/2025/june/{identifier.lower()}.html",
         "doc_kind": "html_page" if is_html else "file",
         "file_path": file_path,
-        "file_hash": file_hash(raw),
-        "content_hash": content_hash(raw, is_html=is_html),
+        "file_hash": file_hash(raw, is_html=is_html),
         "content_type": "text/html; charset=utf-8" if is_html else "application/pdf",
         "file_size": len(raw),
         "file_extension": extension,
@@ -167,7 +166,7 @@ class TestTransformRange:
         assert doc is not None
         assert doc["file_path"] == "curated/body=15376/partition=2025-06/ADJ-00053864.html"
         assert doc["file_hash"] != seeded["records"][0]["file_hash"]  # new bytes, new hash
-        assert doc["source_content_hash"] == seeded["records"][0]["content_hash"]
+        assert doc["source_file_hash"] == seeded["records"][0]["file_hash"]
         assert doc["content_is_empty"] is False
         assert doc["extracted_title"].startswith("ADJ-00053864")
 
@@ -200,7 +199,7 @@ class TestTransformRange:
         )
         database[settings.mongo.landing_collection].update_one(
             {"_id": "ADJ-00053864"},
-            {"$set": {"content_hash": content_hash(new_html, is_html=True)}},
+            {"$set": {"file_hash": file_hash(new_html, is_html=True)}},
         )
 
         stats = run_transform(settings, database, s3_client)

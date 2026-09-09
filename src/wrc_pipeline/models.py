@@ -44,8 +44,7 @@ class DecisionRecord(BaseModel):
     doc_kind: DocKind
 
     file_path: str  # object key in the landing bucket
-    file_hash: str  # sha256 of the exact stored bytes
-    content_hash: str  # sha256 of canonicalized bytes; drives change detection
+    file_hash: str  # sha256 (canonicalised for HTML); drives change detection
     content_type: str
     file_size: int
     file_extension: str

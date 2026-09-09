@@ -35,7 +35,7 @@ uv run scrapy crawl decisions -a start_date=2025-01-01 -a end_date=2025-06-30
 What lands where:
 
 - Documents → MinIO bucket `wrc-landing`, keys like `landing/body=15376/partition=2025-06/ADJ-00054658.html` (HTML case pages as `.html`; directly-linked PDFs/DOCs as-is; legacy in-page decision PDFs as `…__attachment_N.pdf`).
-- Metadata → Mongo collection `decisions_landing` (one record per decision: title, description, dates, body, URLs, `file_path`, sha256 `file_hash` + canonical `content_hash`, provenance).
+- Metadata → Mongo collection `decisions_landing` (one record per decision: title, description, dates, body, URLs, `file_path`, sha256 `file_hash` (canonicalised for HTML), provenance).
 - A run report → `pipeline_runs` (found / scraped / uploaded / skipped-unchanged / failures with reasons).
 
 Logs are JSON lines (Scrapy internals included). Re-running the same range is **idempotent**: no duplicate records, unchanged files are not re-uploaded (`files_skipped_unchanged` in the summary).
@@ -46,7 +46,7 @@ Logs are JSON lines (Scrapy internals included). Re-running the same range is **
 uv run wrc-transform --start-date 2025-01-01 --end-date 2025-06-30
 ```
 
-For every landing record in the range: PDF/DOC copied byte-identical, HTML reduced to the decision's relevant content (site chrome stripped), **all files renamed to `identifier.ext`** in `wrc-curated`, and a curated record (new path, new hash, extraction-quality fields) upserted into `decisions_curated`. The landing zone is never modified. Idempotent via `source_content_hash`.
+For every landing record in the range: PDF/DOC copied byte-identical, HTML reduced to the decision's relevant content (site chrome stripped), **all files renamed to `identifier.ext`** in `wrc-curated`, and a curated record (new path, new hash, extraction-quality fields) upserted into `decisions_curated`. The landing zone is never modified. Idempotent via `source_file_hash`.
 
 Options: `--bodies 3,15376`, `--max-workers 8`.
 
@@ -87,7 +87,7 @@ January–June 2025, all four bodies (1,801 HTTP requests, ~9.4 min at ~3 req/s)
 | transform again | 1,618 selected | 0 | — | 1,618 | 0 |
 
 ¹ Documents already landed by an earlier smoke run of the same month.
-² Three decisions are listed twice by the site under one identifier with two live URLs of differing content (e.g. `adj-00052577.html` and an amended `adj-000525771.html`); each run converges the record to the last-fetched version. Every other document was recognised as unchanged despite the server's volatile `<!-- Elapsed time -->` comment — see the dual-hash design in [ARCHITECTURE.md](ARCHITECTURE.md).
+² Three decisions are listed twice by the site under one identifier with two live URLs of differing content (e.g. `adj-00052577.html` and an amended `adj-000525771.html`); each run converges the record to the last-fetched version. Every other document was recognised as unchanged despite the server's volatile `<!-- Elapsed time -->` comment — see the canonicalised `file_hash` in [ARCHITECTURE.md](ARCHITECTURE.md).
 ³ 1,621 scraped items minus those 3 site-side duplicate listings = 1,618 distinct records.
 
 ## Tests & quality gates
@@ -109,7 +109,7 @@ src/wrc_pipeline/
 ├── constants.py         # site facts (body ids, URL scheme, magic bytes)
 ├── logging.py           # structlog: one JSON stream, third-party logs included
 ├── models.py            # DecisionRecord / AttachmentRef / RunReport (validation)
-├── hashing.py           # file_hash + canonicalized content_hash (change detection)
+├── hashing.py           # file_hash: sha256, canonicalised for HTML (change detection)
 ├── naming.py            # identifier sanitization, type detection, object keys
 ├── storage/             # Mongo repositories + S3-compatible object store
 ├── scraping/            # Scrapy: spider, async persistence pipeline, settings
