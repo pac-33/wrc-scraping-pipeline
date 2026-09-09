@@ -55,12 +55,14 @@ def make_attachment_item(identifier: str = "EE47-1999") -> AttachmentItem:
 @pytest.fixture
 def spider() -> DecisionsSpider:
     crawler = get_crawler(DecisionsSpider)
-    return DecisionsSpider.from_crawler(crawler, start_date="2025-06-01", end_date="2025-06-30")
+    spider = DecisionsSpider.from_crawler(crawler, start_date="2025-06-01", end_date="2025-06-30")
+    crawler.spider = spider  # what Crawler.crawl() does before pipelines open
+    return spider
 
 
 class TestHashingPipeline:
     def test_html_document_fields(self, spider: DecisionsSpider) -> None:
-        item = HashingPipeline().process_item(make_document_item(), spider)
+        item = HashingPipeline().process_item(make_document_item())
 
         assert item.file_extension == ".html"
         assert item.content_type == "text/html; charset=utf-8"
@@ -70,13 +72,13 @@ class TestHashingPipeline:
 
     def test_volatile_comment_does_not_change_html_hash(self, spider: DecisionsSpider) -> None:
         pipeline = HashingPipeline()
-        first = pipeline.process_item(make_document_item(HTML_V1), spider)
-        refetch = pipeline.process_item(make_document_item(HTML_V1_REFETCH), spider)
+        first = pipeline.process_item(make_document_item(HTML_V1))
+        refetch = pipeline.process_item(make_document_item(HTML_V1_REFETCH))
 
         assert first.file_hash == refetch.file_hash
 
     def test_pdf_attachment_fields(self, spider: DecisionsSpider) -> None:
-        item = HashingPipeline().process_item(make_attachment_item(), spider)
+        item = HashingPipeline().process_item(make_attachment_item())
 
         assert item.file_extension == ".pdf"
         assert item.content_type == "application/pdf"
@@ -84,9 +86,9 @@ class TestHashingPipeline:
 
 
 @pytest.fixture
-def persistence(settings: Settings, s3_client) -> PersistencePipeline:
+def persistence(settings: Settings, s3_client, spider: DecisionsSpider) -> PersistencePipeline:
     """PersistencePipeline wired to mongomock (behind an async shim) + moto."""
-    pipeline = PersistencePipeline(settings)
+    pipeline = PersistencePipeline(settings, spider.crawler)
     client: mongomock.MongoClient = mongomock.MongoClient(tz_aware=True)
     database = client[settings.mongo.database]
     pipeline._client = AsyncClientShim()  # type: ignore[assignment]
@@ -109,10 +111,10 @@ def stored_keys(s3_client, bucket: str) -> list[str]:
 
 
 class TestPersistencePipelineIdempotency:
-    def process(self, persistence: PersistencePipeline, spider: DecisionsSpider, item) -> None:
+    def process(self, persistence: PersistencePipeline, item) -> None:
         """One item through both pipelines; the persistence step is a coroutine."""
-        hashed = HashingPipeline().process_item(item, spider)
-        asyncio.run(persistence.process_item(hashed, spider))
+        hashed = HashingPipeline().process_item(item)
+        asyncio.run(persistence.process_item(hashed))
 
     def test_first_run_uploads_and_upserts(
         self,
@@ -121,7 +123,7 @@ class TestPersistencePipelineIdempotency:
         settings: Settings,
         s3_client,
     ) -> None:
-        self.process(persistence, spider, make_document_item())
+        self.process(persistence, make_document_item())
 
         assert stored_keys(s3_client, settings.object_store.landing_bucket) == [
             "landing/body=15376/partition=2025-06/ADJ-00053864.html"
@@ -147,12 +149,12 @@ class TestPersistencePipelineIdempotency:
     ) -> None:
         """Idempotency: the refetch differs only by the volatile server comment,
         so no new upload happens and the record is only touched."""
-        self.process(persistence, spider, make_document_item(HTML_V1))
+        self.process(persistence, make_document_item(HTML_V1))
         first = persistence._mongo_database[settings.mongo.landing_collection].find_one(
             {"_id": "ADJ-00053864"}
         )
 
-        self.process(persistence, spider, make_document_item(HTML_V1_REFETCH))
+        self.process(persistence, make_document_item(HTML_V1_REFETCH))
 
         stats = spider.crawler.stats
         assert stats.get_value("wrc/files_uploaded") == 1
@@ -171,8 +173,8 @@ class TestPersistencePipelineIdempotency:
     def test_changed_content_is_reuploaded(
         self, persistence: PersistencePipeline, spider: DecisionsSpider, settings: Settings
     ) -> None:
-        self.process(persistence, spider, make_document_item(HTML_V1))
-        self.process(persistence, spider, make_document_item(HTML_V2))
+        self.process(persistence, make_document_item(HTML_V1))
+        self.process(persistence, make_document_item(HTML_V2))
 
         stats = spider.crawler.stats
         assert stats.get_value("wrc/files_uploaded") == 2
@@ -191,7 +193,7 @@ class TestPersistencePipelineIdempotency:
         settings: Settings,
         s3_client,
     ) -> None:
-        self.process(persistence, spider, make_attachment_item())
+        self.process(persistence, make_attachment_item())
 
         assert stored_keys(s3_client, settings.object_store.landing_bucket) == [
             "landing/body=1/partition=1999-12/EE47-1999__attachment_1.pdf"
@@ -212,14 +214,16 @@ class TestPersistenceConcurrency:
         interleaved coroutines must each land their own record."""
         hashing = HashingPipeline()
         items = [
-            hashing.process_item(make_document_item(identifier=f"ADJ-{n:08d}"), spider)
-            for n in range(5)
+            hashing.process_item(make_document_item(identifier=f"ADJ-{n:08d}")) for n in range(5)
         ]
 
         async def run_all() -> None:
-            await asyncio.gather(*(persistence.process_item(item, spider) for item in items))
+            await asyncio.gather(*(persistence.process_item(item) for item in items))
 
         asyncio.run(run_all())
+
+        shim = persistence._landing._collection  # the AsyncCollectionShim
+        assert shim.max_in_flight > 1, "items ran one after another instead of overlapping"
 
         collection = persistence._mongo_database[settings.mongo.landing_collection]
         assert collection.count_documents({}) == 5
@@ -232,10 +236,10 @@ class TestPersistenceConcurrency:
             raise RuntimeError("mongo down")
 
         persistence._landing.upsert_record = boom  # type: ignore[method-assign]
-        item = HashingPipeline().process_item(make_document_item(), spider)
+        item = HashingPipeline().process_item(make_document_item())
 
         with pytest.raises(DropItem):
-            asyncio.run(persistence.process_item(item, spider))
+            asyncio.run(persistence.process_item(item))
 
         assert spider.failures[0]["reason"] == "persistence_error"
         assert spider.failures[0]["identifier"] == "ADJ-00053864"
@@ -245,8 +249,8 @@ class TestRunReport:
     def test_report_written_on_spider_close(
         self, persistence: PersistencePipeline, spider: DecisionsSpider, settings: Settings
     ) -> None:
-        hashed = HashingPipeline().process_item(make_document_item(), spider)
-        asyncio.run(persistence.process_item(hashed, spider))
+        hashed = HashingPipeline().process_item(make_document_item())
+        asyncio.run(persistence.process_item(hashed))
         spider.crawler.stats.inc_value("wrc/records_found", 192)
 
         asyncio.run(persistence._on_spider_closed(spider, reason="finished"))

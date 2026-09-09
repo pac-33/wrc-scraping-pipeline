@@ -121,6 +121,35 @@ class TestAsyncRepository:
         assert doc["last_run_id"] == "run-003"
         assert asyncio.run(async_repo.get_file_hash("missing")) is None
 
+    def test_attachment_landing_first_keeps_provenance(
+        self, async_repo: AsyncMetadataRepository, mongo_database: mongomock.Database
+    ) -> None:
+        """With coroutine persistence an attachment can reach Mongo before its
+        parent document; the record it creates must carry the provenance the
+        parent's ``$setOnInsert`` would otherwise have written."""
+        attachment = AttachmentRef(
+            url="https://www.workplacerelations.ie/en/Equality_Tribunal_Import/EE-1999-47.pdf",
+            file_path="landing/body=1/partition=1999-12/EE47-1999__attachment_1.pdf",
+            file_hash="e" * 64,
+            content_type="application/pdf",
+            file_size=59300,
+        )
+        seen = datetime(1999, 12, 15, tzinfo=UTC)
+
+        async def scenario() -> None:
+            await async_repo.add_attachment("EE47-1999", attachment, "run-001", seen)
+            await async_repo.upsert_record(make_record(identifier="EE47-1999", run_id="run-002"))
+
+        asyncio.run(scenario())
+
+        doc = mongo_database["decisions_landing"].find_one({"_id": "EE47-1999"})
+        assert doc is not None
+        assert doc["first_run_id"] == "run-001"
+        assert doc["first_seen_at"].replace(tzinfo=None) == seen.replace(tzinfo=None)
+        assert doc["last_run_id"] == "run-002"
+        assert doc["title"] == "ADJ-00054658"
+        assert len(doc["attachments"]) == 1
+
     def test_add_attachment_is_idempotent(
         self, async_repo: AsyncMetadataRepository, mongo_database: mongomock.Database
     ) -> None:
@@ -132,9 +161,11 @@ class TestAsyncRepository:
             file_size=59300,
         )
 
+        seen = datetime(1999, 12, 15, tzinfo=UTC)
+
         async def scenario() -> None:
-            await async_repo.add_attachment("EE47-1999", attachment)
-            await async_repo.add_attachment("EE47-1999", attachment)
+            await async_repo.add_attachment("EE47-1999", attachment, "run-001", seen)
+            await async_repo.add_attachment("EE47-1999", attachment, "run-001", seen)
 
         asyncio.run(scenario())
 
@@ -173,8 +204,9 @@ class TestAttachments:
             content_type="application/pdf",
             file_size=59300,
         )
-        repo.add_attachment("EE47-1999", attachment)
-        repo.add_attachment("EE47-1999", attachment)
+        seen = datetime(1999, 12, 15, tzinfo=UTC)
+        repo.add_attachment("EE47-1999", attachment, "run-001", seen)
+        repo.add_attachment("EE47-1999", attachment, "run-001", seen)
 
         doc = mongo_database["decisions_landing"].find_one({"_id": "EE47-1999"})
         assert doc is not None

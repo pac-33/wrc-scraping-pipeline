@@ -87,6 +87,21 @@ def _upsert_update(record: DecisionRecord) -> tuple[str, Document]:
     return identifier, update
 
 
+def _attachment_update(attachment: AttachmentRef, run_id: str, seen_at: datetime) -> Document:
+    """``$addToSet`` the attachment; if this upsert creates the record (the
+    attachment landed before its parent), stamp the provenance the parent's
+    later upsert can no longer ``$setOnInsert``."""
+    return {
+        "$addToSet": {"attachments": attachment.model_dump()},
+        "$setOnInsert": {
+            "first_seen_at": seen_at,
+            "first_run_id": run_id,
+            "last_seen_at": seen_at,
+            "last_run_id": run_id,
+        },
+    }
+
+
 class MetadataRepository:
     """Repository over one decisions collection (landing or curated)."""
 
@@ -114,22 +129,17 @@ class MetadataRepository:
             {"$set": {"last_seen_at": seen_at, "last_run_id": run_id}},
         )
 
-    def add_attachment(self, identifier: str, attachment: AttachmentRef) -> None:
+    def add_attachment(
+        self, identifier: str, attachment: AttachmentRef, run_id: str, seen_at: datetime
+    ) -> None:
         """Attach a linked file to its parent record. ``$addToSet`` keys on the
         full sub-document, so re-runs with identical content do not duplicate;
-        upsert covers the rare case where the attachment lands before the
-        parent record (the parent upsert later fills the remaining fields)."""
+        upsert covers the attachment landing before its parent record."""
+        update = _attachment_update(attachment, run_id, seen_at)
         try:
-            self._collection.update_one(
-                {"_id": identifier},
-                {"$addToSet": {"attachments": attachment.model_dump()}},
-                upsert=True,
-            )
+            self._collection.update_one({"_id": identifier}, update, upsert=True)
         except DuplicateKeyError:
-            self._collection.update_one(
-                {"_id": identifier},
-                {"$addToSet": {"attachments": attachment.model_dump()}},
-            )
+            self._collection.update_one({"_id": identifier}, update)
 
     def iter_partition(
         self,
@@ -180,8 +190,10 @@ class AsyncMetadataRepository:
             {"$set": {"last_seen_at": seen_at, "last_run_id": run_id}},
         )
 
-    async def add_attachment(self, identifier: str, attachment: AttachmentRef) -> None:
-        update = {"$addToSet": {"attachments": attachment.model_dump()}}
+    async def add_attachment(
+        self, identifier: str, attachment: AttachmentRef, run_id: str, seen_at: datetime
+    ) -> None:
+        update = _attachment_update(attachment, run_id, seen_at)
         try:
             await self._collection.update_one({"_id": identifier}, update, upsert=True)
         except DuplicateKeyError:
