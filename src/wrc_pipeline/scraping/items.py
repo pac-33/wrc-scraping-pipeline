@@ -31,7 +31,6 @@ class DocumentItem:
 
     # Derived by HashingPipeline:
     file_hash: str = ""
-    content_hash: str = ""
     file_extension: str = ""
     file_path: str = ""
     content_type: str = ""
@@ -51,7 +50,6 @@ class AttachmentItem:
     content_type_header: str | None = None
 
     file_hash: str = ""
-    content_hash: str = ""
     file_extension: str = ""
     file_path: str = ""
     content_type: str = ""

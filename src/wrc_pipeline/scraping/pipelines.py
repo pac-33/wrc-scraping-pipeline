@@ -2,13 +2,13 @@
 
 Order matters:
 
-1. ``HashingPipeline`` — pure derivation (hashes, extension, content type,
+1. ``HashingPipeline`` — pure derivation (hash, extension, content type,
    object key). No I/O, trivially testable.
 2. ``PersistencePipeline`` — the single place that talks to storage, written as
    a coroutine pipeline: Scrapy awaits ``process_item`` on its asyncio reactor,
    so a Mongo round trip (PyMongo's async client) suspends only the item that
    is waiting for it while downloads and other items carry on. Per document:
-   compare the canonical content hash against MongoDB; unchanged documents only
+   compare the file hash against MongoDB; unchanged documents only
    get their seen-markers touched (no upload), changed/new documents are
    uploaded first and upserted after — so a landing record always points at
    bytes that exist in the bucket.
@@ -26,7 +26,7 @@ from scrapy.exceptions import DropItem
 
 from wrc_pipeline.config import Settings, get_settings
 from wrc_pipeline.constants import EXTENSION_BY_CONTENT_TYPE
-from wrc_pipeline.hashing import content_hash, file_hash
+from wrc_pipeline.hashing import file_hash
 from wrc_pipeline.models import AttachmentRef, DecisionRecord, RunReport, utcnow
 from wrc_pipeline.naming import attachment_key, detect_extension, landing_key
 from wrc_pipeline.scraping.items import AttachmentItem, DocumentItem
@@ -47,11 +47,9 @@ class HashingPipeline:
         raw: bytes = adapter["raw_body"]
         source_url = item.url if isinstance(item, AttachmentItem) else item.doc_url
         extension = detect_extension(source_url, adapter.get("content_type_header"), raw)
-        is_html = extension == ".html"
 
         adapter["file_extension"] = extension
-        adapter["file_hash"] = file_hash(raw)
-        adapter["content_hash"] = content_hash(raw, is_html=is_html)
+        adapter["file_hash"] = file_hash(raw, is_html=extension == ".html")
         adapter["file_size"] = len(raw)
         adapter["content_type"] = _final_content_type(adapter.get("content_type_header"), extension)
         if isinstance(item, AttachmentItem):
@@ -119,10 +117,10 @@ class PersistencePipeline:
     async def _persist_document(self, item: DocumentItem) -> DocumentItem:
         spider = self._spider
         now = utcnow()
-        stored_hash = await self._landing.get_content_hash(item.identifier)
+        stored_hash = await self._landing.get_file_hash(item.identifier)
         run_id: str = getattr(spider, "run_id", "unknown")
 
-        if stored_hash == item.content_hash:
+        if stored_hash == item.file_hash:
             await self._landing.touch_unchanged(item.identifier, run_id, now)
             self._crawler.stats.inc_value("wrc/files_skipped_unchanged")
             spider.logger.debug(
@@ -155,7 +153,6 @@ class PersistencePipeline:
                 doc_kind=item.doc_kind,
                 file_path=item.file_path,
                 file_hash=item.file_hash,
-                content_hash=item.content_hash,
                 content_type=item.content_type,
                 file_size=item.file_size,
                 file_extension=item.file_extension,

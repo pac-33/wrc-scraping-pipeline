@@ -108,9 +108,9 @@ class MetadataRepository:
     def __init__(self, collection: Collection[Document]) -> None:
         self._collection = collection
 
-    def get_content_hash(self, identifier: str) -> str | None:
-        doc = self._collection.find_one({"_id": identifier}, projection={"content_hash": 1})
-        return doc.get("content_hash") if doc else None
+    def get_file_hash(self, identifier: str) -> str | None:
+        doc = self._collection.find_one({"_id": identifier}, projection={"file_hash": 1})
+        return doc.get("file_hash") if doc else None
 
     def upsert_record(self, record: DecisionRecord) -> bool:
         """Insert or refresh a record; returns True when newly inserted.
@@ -172,9 +172,9 @@ class AsyncMetadataRepository:
     def __init__(self, collection: AsyncCollection[Document]) -> None:
         self._collection = collection
 
-    async def get_content_hash(self, identifier: str) -> str | None:
-        doc = await self._collection.find_one({"_id": identifier}, projection={"content_hash": 1})
-        return doc.get("content_hash") if doc else None
+    async def get_file_hash(self, identifier: str) -> str | None:
+        doc = await self._collection.find_one({"_id": identifier}, projection={"file_hash": 1})
+        return doc.get("file_hash") if doc else None
 
     async def upsert_record(self, record: DecisionRecord) -> bool:
         identifier, update = _upsert_update(record)
@@ -203,7 +203,7 @@ class AsyncMetadataRepository:
 class CuratedRepository:
     """Repository over the curated collection written by the transformation.
 
-    Mirrors the landing repository's idempotency model: ``source_content_hash``
+    Mirrors the landing repository's idempotency model: ``source_file_hash``
     records which landing content a curated record was derived from, so an
     unchanged source short-circuits re-transformation.
     """
@@ -212,8 +212,8 @@ class CuratedRepository:
         self._collection = collection
 
     def get_source_hash(self, identifier: str) -> str | None:
-        doc = self._collection.find_one({"_id": identifier}, projection={"source_content_hash": 1})
-        return doc.get("source_content_hash") if doc else None
+        doc = self._collection.find_one({"_id": identifier}, projection={"source_file_hash": 1})
+        return doc.get("source_file_hash") if doc else None
 
     def upsert(self, identifier: str, doc: Document, first_seen_at: datetime) -> bool:
         update = {

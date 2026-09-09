@@ -9,8 +9,8 @@ For every landing record in [start_date, end_date] (by partition_date):
   quality fields) is upserted into the curated collection.
 
 The landing zone is never written to. Re-runs are idempotent: a record whose
-landing ``content_hash`` already matches the curated ``source_content_hash``
-is skipped, so only new or re-scraped documents are re-transformed.
+landing ``file_hash`` already matches the curated ``source_file_hash`` is
+skipped, so only new or re-scraped documents are re-transformed.
 
 This module is orchestrator-agnostic — the CLI (``python -m
 wrc_pipeline.transform``) and the Dagster asset are both thin wrappers around
@@ -144,7 +144,7 @@ class _RecordTransformer:
     def transform_record(self, record: dict[str, Any]) -> dict[str, Any]:
         identifier = record["_id"]
         try:
-            if self._curated.get_source_hash(identifier) == record["content_hash"]:
+            if self._curated.get_source_hash(identifier) == record["file_hash"]:
                 logger.debug("record_unchanged", identifier=identifier, run_id=self._run_id)
                 return {"status": "skipped_unchanged", "identifier": identifier}
             return self._do_transform(record)
@@ -167,7 +167,8 @@ class _RecordTransformer:
         raw = self._store.get_bytes(landing_bucket, record["file_path"])
 
         extraction_fields: dict[str, Any] = {}
-        if record["file_extension"] == _HTML_EXTENSION:
+        is_html = record["file_extension"] == _HTML_EXTENSION
+        if is_html:
             extraction = extract_relevant_content(raw, identifier)
             output_bytes = extraction.html
             content_type = "text/html; charset=utf-8"
@@ -183,7 +184,7 @@ class _RecordTransformer:
             content_type = record["content_type"]
 
         new_key = curated_key(body, record["partition_key"], identifier, record["file_extension"])
-        new_hash = file_hash(output_bytes)
+        new_hash = file_hash(output_bytes, is_html=is_html)
         self._store.put_bytes(
             curated_bucket,
             new_key,
@@ -212,7 +213,6 @@ class _RecordTransformer:
             "content_type": content_type,
             "source_file_path": record["file_path"],
             "source_file_hash": record["file_hash"],
-            "source_content_hash": record["content_hash"],
             "attachments": attachments,
             "transformed_at": now,
             "transform_run_id": self._run_id,
