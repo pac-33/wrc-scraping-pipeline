@@ -4,11 +4,14 @@ Order matters:
 
 1. ``HashingPipeline`` — pure derivation (hashes, extension, content type,
    object key). No I/O, trivially testable.
-2. ``PersistencePipeline`` — the single place that talks to storage. Per
-   document: compare the canonical content hash against MongoDB; unchanged
-   documents only get their seen-markers touched (no upload), changed/new
-   documents are uploaded first and upserted after — so a landing record
-   always points at bytes that exist in the bucket.
+2. ``PersistencePipeline`` — the single place that talks to storage, written as
+   a coroutine pipeline: Scrapy awaits ``process_item`` on its asyncio reactor,
+   so a Mongo round trip (PyMongo's async client) suspends only the item that
+   is waiting for it while downloads and other items carry on. Per document:
+   compare the canonical content hash against MongoDB; unchanged documents only
+   get their seen-markers touched (no upload), changed/new documents are
+   uploaded first and upserted after — so a landing record always points at
+   bytes that exist in the bucket.
 """
 
 from typing import Any
@@ -25,11 +28,10 @@ from wrc_pipeline.models import AttachmentRef, DecisionRecord, RunReport, utcnow
 from wrc_pipeline.naming import attachment_key, detect_extension, landing_key
 from wrc_pipeline.scraping.items import AttachmentItem, DocumentItem
 from wrc_pipeline.storage.mongo import (
-    MetadataRepository,
-    RunReportStore,
-    create_mongo_client,
-    ensure_indexes,
-    get_database,
+    AsyncMetadataRepository,
+    AsyncRunReportStore,
+    create_async_mongo_client,
+    ensure_indexes_async,
 )
 from wrc_pipeline.storage.s3 import ObjectStore, create_s3_client
 
@@ -62,7 +64,7 @@ class HashingPipeline:
 
 class PersistencePipeline:
     """Change-detect against MongoDB, upload to the landing bucket, upsert
-    metadata, and write the end-of-run report."""
+    metadata, and write the end-of-run report. Every hook is a coroutine."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -71,25 +73,25 @@ class PersistencePipeline:
     def from_crawler(cls, crawler: Crawler) -> "PersistencePipeline":
         return cls(get_settings())
 
-    def open_spider(self, spider: Spider) -> None:
+    async def open_spider(self, spider: Spider) -> None:
         # spider_closed (unlike pipeline close_spider) delivers the close
         # reason, which belongs in the run report.
         spider.crawler.signals.connect(self._on_spider_closed, signal=signals.spider_closed)
-        self._client = create_mongo_client(self._settings.mongo)
-        database = get_database(self._client, self._settings.mongo)
-        ensure_indexes(database, self._settings.mongo)
-        self._landing = MetadataRepository(database[self._settings.mongo.landing_collection])
-        self._runs = RunReportStore(database[self._settings.mongo.runs_collection])
+        self._client = create_async_mongo_client(self._settings.mongo)
+        database = self._client[self._settings.mongo.database]
+        await ensure_indexes_async(database, self._settings.mongo)
+        self._landing = AsyncMetadataRepository(database[self._settings.mongo.landing_collection])
+        self._runs = AsyncRunReportStore(database[self._settings.mongo.runs_collection])
         self._store = ObjectStore(create_s3_client(self._settings.object_store))
         self._bucket = self._settings.object_store.landing_bucket
         self._store.ensure_bucket(self._bucket)
         self._store.ensure_bucket(self._settings.object_store.curated_bucket)
 
-    def process_item(self, item: DocumentItem | AttachmentItem, spider: Spider) -> Any:
+    async def process_item(self, item: DocumentItem | AttachmentItem, spider: Spider) -> Any:
         try:
             if isinstance(item, AttachmentItem):
-                return self._persist_attachment(item, spider)
-            return self._persist_document(item, spider)
+                return await self._persist_attachment(item, spider)
+            return await self._persist_document(item, spider)
         except DropItem:
             raise
         except Exception as exc:
@@ -102,13 +104,13 @@ class PersistencePipeline:
             msg = f"persistence failed for {ItemAdapter(item).get('identifier')}: {exc!r}"
             raise DropItem(msg) from exc
 
-    def _persist_document(self, item: DocumentItem, spider: Spider) -> DocumentItem:
+    async def _persist_document(self, item: DocumentItem, spider: Spider) -> DocumentItem:
         now = utcnow()
-        stored_hash = self._landing.get_content_hash(item.identifier)
+        stored_hash = await self._landing.get_content_hash(item.identifier)
         run_id: str = getattr(spider, "run_id", "unknown")
 
         if stored_hash == item.content_hash:
-            self._landing.touch_unchanged(item.identifier, run_id, now)
+            await self._landing.touch_unchanged(item.identifier, run_id, now)
             spider.crawler.stats.inc_value("wrc/files_skipped_unchanged")
             spider.logger.debug(
                 "document_unchanged",
@@ -147,7 +149,7 @@ class PersistencePipeline:
                 scraped_at=now,
                 run_id=run_id,
             )
-            inserted = self._landing.upsert_record(record)
+            inserted = await self._landing.upsert_record(record)
             spider.crawler.stats.inc_value(
                 "wrc/records_inserted" if inserted else "wrc/records_updated"
             )
@@ -164,7 +166,7 @@ class PersistencePipeline:
         spider.crawler.stats.inc_value("wrc/records_scraped")
         return item
 
-    def _persist_attachment(self, item: AttachmentItem, spider: Spider) -> AttachmentItem:
+    async def _persist_attachment(self, item: AttachmentItem, spider: Spider) -> AttachmentItem:
         self._store.put_bytes(
             self._bucket,
             item.file_path,
@@ -172,7 +174,7 @@ class PersistencePipeline:
             content_type=item.content_type,
             metadata={"sha256": item.file_hash, "source-url": item.url},
         )
-        self._landing.add_attachment(
+        await self._landing.add_attachment(
             item.identifier,
             AttachmentRef(
                 url=item.url,
@@ -185,13 +187,13 @@ class PersistencePipeline:
         spider.crawler.stats.inc_value("wrc/attachments_downloaded")
         return item
 
-    def _on_spider_closed(self, spider: Spider, reason: str) -> None:
+    async def _on_spider_closed(self, spider: Spider, reason: str) -> None:
         try:
-            self._write_run_report(spider, reason)
+            await self._write_run_report(spider, reason)
         finally:
-            self._client.close()
+            await self._client.close()
 
-    def _write_run_report(self, spider: Spider, reason: str) -> None:
+    async def _write_run_report(self, spider: Spider, reason: str) -> None:
         stats = spider.crawler.stats
         report = RunReport(
             run_id=getattr(spider, "run_id", "unknown"),
@@ -210,7 +212,7 @@ class PersistencePipeline:
             finished_at=utcnow(),
             finish_reason=reason,
         )
-        self._runs.save(report)
+        await self._runs.save(report)
         spider.logger.info(
             "run_summary",
             extra={
