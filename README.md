@@ -93,7 +93,7 @@ January–June 2025, all four bodies (1,801 HTTP requests, ~9.4 min at ~3 req/s)
 ## Tests & quality gates
 
 ```bash
-uv run pytest            # 108 tests, offline (captured real pages as fixtures)
+uv run pytest            # 97 tests, offline (captured real pages as fixtures)
 uv run ruff check .      # lint
 uv run ruff format .     # format
 uv run mypy              # strict typing on first-party code
@@ -112,7 +112,7 @@ src/wrc_pipeline/
 ├── hashing.py           # file_hash + canonicalized content_hash (change detection)
 ├── naming.py            # identifier sanitization, type detection, object keys
 ├── storage/             # Mongo repositories + S3-compatible object store
-├── scraping/            # Scrapy: spider, retry middleware, pipelines, settings
+├── scraping/            # Scrapy: spider, pipelines, settings
 ├── transform/           # BeautifulSoup extraction + curated writer + CLI
 └── orchestration/       # Dagster assets, definitions, Pipes spider runner
 ```
