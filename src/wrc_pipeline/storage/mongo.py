@@ -1,18 +1,26 @@
-"""MongoDB access: client factory, index bootstrap, and the metadata repository.
+"""MongoDB access: client factories, index bootstrap, and the repositories.
 
-The repository is the only code that touches collections directly; spiders,
-pipelines and the transformation call it through this interface. Records use
-the natural business key as ``_id`` (the decision identifier), which makes
-duplicate prevention a property of the primary-key index and lets upserts
-filter on ``_id`` — the access pattern MongoDB recommends to avoid the
-concurrent-upsert duplicate-key race.
+The repositories are the only code that touches collections directly; the
+scraper's pipeline, the transformation and tooling call them through this
+interface. Records use the natural business key as ``_id`` (the decision
+identifier), which makes duplicate prevention a property of the primary-key
+index and lets upserts filter on ``_id`` — the access pattern MongoDB
+recommends to avoid the concurrent-upsert duplicate-key race.
+
+Two flavours share one update logic. The synchronous repositories back the
+thread-pooled transformation and tooling. The asynchronous ones, on PyMongo's
+async client (stable since 4.13), back Scrapy's coroutine item pipeline, so a
+Mongo round trip suspends only the item waiting for it instead of the whole
+crawl.
 """
 
 from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
 
-from pymongo import ASCENDING, MongoClient
+from pymongo import ASCENDING, AsyncMongoClient, MongoClient
+from pymongo.asynchronous.collection import AsyncCollection
+from pymongo.asynchronous.database import AsyncDatabase
 from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
@@ -22,10 +30,22 @@ from wrc_pipeline.models import AttachmentRef, DecisionRecord, RunReport
 
 Document = dict[str, Any]
 
+_PARTITION_INDEX = [("partition_date", ASCENDING), ("body", ASCENDING)]
+_RUN_ID_INDEX = [("run_id", ASCENDING)]
+
 
 def create_mongo_client(settings: MongoSettings) -> MongoClient[Document]:
     # tz_aware so datetimes round-trip as timezone-aware UTC instead of naive.
     return MongoClient(
+        settings.uri.get_secret_value(),
+        tz_aware=True,
+        serverSelectionTimeoutMS=5_000,
+    )
+
+
+def create_async_mongo_client(settings: MongoSettings) -> AsyncMongoClient[Document]:
+    """Same options as the sync client, on PyMongo's asyncio-native client."""
+    return AsyncMongoClient(
         settings.uri.get_secret_value(),
         tz_aware=True,
         serverSelectionTimeoutMS=5_000,
@@ -41,13 +61,45 @@ def ensure_indexes(db: Database[Document], settings: MongoSettings) -> None:
     no-op when the index already exists). Kept in code — Mongo initdb scripts
     only run on empty volumes, which is exactly when you'd forget them."""
     for name in (settings.landing_collection, settings.curated_collection):
-        db[name].create_index(
-            [("partition_date", ASCENDING), ("body", ASCENDING)],
-            name="ix_partition_body",
-        )
-    db[settings.runs_collection].create_index(
-        [("run_id", ASCENDING)], name="uq_run_id", unique=True
-    )
+        db[name].create_index(_PARTITION_INDEX, name="ix_partition_body")
+    db[settings.runs_collection].create_index(_RUN_ID_INDEX, name="uq_run_id", unique=True)
+
+
+async def ensure_indexes_async(db: AsyncDatabase[Document], settings: MongoSettings) -> None:
+    for name in (settings.landing_collection, settings.curated_collection):
+        await db[name].create_index(_PARTITION_INDEX, name="ix_partition_body")
+    await db[settings.runs_collection].create_index(_RUN_ID_INDEX, name="uq_run_id", unique=True)
+
+
+def _upsert_update(record: DecisionRecord) -> tuple[str, Document]:
+    """The (_id, update) pair for a landing record, shared by both repositories.
+
+    ``$set`` refreshes everything re-derivable from the current scrape;
+    ``$setOnInsert`` pins first-seen provenance so re-runs never rewrite history.
+    """
+    doc = record.to_document()
+    identifier = doc.pop("identifier")
+    run_id = doc.pop("run_id")
+    update = {
+        "$set": {**doc, "last_run_id": run_id, "last_seen_at": record.scraped_at},
+        "$setOnInsert": {"first_seen_at": record.scraped_at, "first_run_id": run_id},
+    }
+    return identifier, update
+
+
+def _attachment_update(attachment: AttachmentRef, run_id: str, seen_at: datetime) -> Document:
+    """``$addToSet`` the attachment; if this upsert creates the record (the
+    attachment landed before its parent), stamp the provenance the parent's
+    later upsert can no longer ``$setOnInsert``."""
+    return {
+        "$addToSet": {"attachments": attachment.model_dump()},
+        "$setOnInsert": {
+            "first_seen_at": seen_at,
+            "first_run_id": run_id,
+            "last_seen_at": seen_at,
+            "last_run_id": run_id,
+        },
+    }
 
 
 class MetadataRepository:
@@ -62,18 +114,8 @@ class MetadataRepository:
 
     def upsert_record(self, record: DecisionRecord) -> bool:
         """Insert or refresh a record; returns True when newly inserted.
-
-        ``$set`` refreshes everything re-derivable from the current scrape;
-        ``$setOnInsert`` pins first-seen provenance so re-runs never rewrite
-        history. Retried once on the documented E11000 upsert race.
-        """
-        doc = record.to_document()
-        identifier = doc.pop("identifier")
-        run_id = doc.pop("run_id")
-        update = {
-            "$set": {**doc, "last_run_id": run_id, "last_seen_at": record.scraped_at},
-            "$setOnInsert": {"first_seen_at": record.scraped_at, "first_run_id": run_id},
-        }
+        Retried once on the documented E11000 upsert race."""
+        identifier, update = _upsert_update(record)
         try:
             result = self._collection.update_one({"_id": identifier}, update, upsert=True)
         except DuplicateKeyError:
@@ -87,22 +129,17 @@ class MetadataRepository:
             {"$set": {"last_seen_at": seen_at, "last_run_id": run_id}},
         )
 
-    def add_attachment(self, identifier: str, attachment: AttachmentRef) -> None:
+    def add_attachment(
+        self, identifier: str, attachment: AttachmentRef, run_id: str, seen_at: datetime
+    ) -> None:
         """Attach a linked file to its parent record. ``$addToSet`` keys on the
         full sub-document, so re-runs with identical content do not duplicate;
-        upsert covers the rare case where the attachment lands before the
-        parent record (the parent upsert later fills the remaining fields)."""
+        upsert covers the attachment landing before its parent record."""
+        update = _attachment_update(attachment, run_id, seen_at)
         try:
-            self._collection.update_one(
-                {"_id": identifier},
-                {"$addToSet": {"attachments": attachment.model_dump()}},
-                upsert=True,
-            )
+            self._collection.update_one({"_id": identifier}, update, upsert=True)
         except DuplicateKeyError:
-            self._collection.update_one(
-                {"_id": identifier},
-                {"$addToSet": {"attachments": attachment.model_dump()}},
-            )
+            self._collection.update_one({"_id": identifier}, update)
 
     def iter_partition(
         self,
@@ -127,6 +164,40 @@ class MetadataRepository:
         if bodies:
             query["body"] = {"$in": bodies}
         return self._collection.count_documents(query)
+
+
+class AsyncMetadataRepository:
+    """The landing-collection writes as coroutines, for the item pipeline."""
+
+    def __init__(self, collection: AsyncCollection[Document]) -> None:
+        self._collection = collection
+
+    async def get_content_hash(self, identifier: str) -> str | None:
+        doc = await self._collection.find_one({"_id": identifier}, projection={"content_hash": 1})
+        return doc.get("content_hash") if doc else None
+
+    async def upsert_record(self, record: DecisionRecord) -> bool:
+        identifier, update = _upsert_update(record)
+        try:
+            result = await self._collection.update_one({"_id": identifier}, update, upsert=True)
+        except DuplicateKeyError:
+            result = await self._collection.update_one({"_id": identifier}, update, upsert=True)
+        return result.upserted_id is not None
+
+    async def touch_unchanged(self, identifier: str, run_id: str, seen_at: datetime) -> None:
+        await self._collection.update_one(
+            {"_id": identifier},
+            {"$set": {"last_seen_at": seen_at, "last_run_id": run_id}},
+        )
+
+    async def add_attachment(
+        self, identifier: str, attachment: AttachmentRef, run_id: str, seen_at: datetime
+    ) -> None:
+        update = _attachment_update(attachment, run_id, seen_at)
+        try:
+            await self._collection.update_one({"_id": identifier}, update, upsert=True)
+        except DuplicateKeyError:
+            await self._collection.update_one({"_id": identifier}, update)
 
 
 class CuratedRepository:
@@ -176,3 +247,13 @@ class RunReportStore:
             {"partitions": partition_key, "finished_at": {"$ne": None}},
             sort=[("finished_at", -1)],
         )
+
+
+class AsyncRunReportStore:
+    def __init__(self, collection: AsyncCollection[Document]) -> None:
+        self._collection = collection
+
+    async def save(self, report: RunReport) -> None:
+        doc = report.model_dump()
+        run_id = doc.pop("run_id")
+        await self._collection.update_one({"run_id": run_id}, {"$set": doc}, upsert=True)
