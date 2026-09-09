@@ -1,1 +1,1 @@
-"""Scrapy ingestion: spider, middlewares and pipelines for the landing zone."""
+"""Scrapy ingestion: spider and item pipelines for the landing zone."""

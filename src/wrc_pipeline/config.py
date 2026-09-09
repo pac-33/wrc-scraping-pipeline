@@ -47,11 +47,8 @@ class ScraperSettings(BaseModel):
     max_concurrent_requests_per_domain: int = 4
     download_timeout_seconds: int = 30
 
+    # Scrapy's stock RetryMiddleware: retries per request on 429/5xx and connection errors.
     retry_times: int = 3
-    retry_after_cap_seconds: int = 120
-    backoff_base_seconds: float = 1.0
-    # Consecutive exhausted-retry failures before the run aborts (circuit breaker).
-    circuit_breaker_threshold: int = 10
 
     # Legacy decisions link PDF/DOC files under /en/*_Import/ paths that
     # robots.txt disallows for crawlers. The case pages present them as the
