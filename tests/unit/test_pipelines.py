@@ -1,16 +1,19 @@
+import asyncio
 from datetime import UTC, datetime
 
 import mongomock
 import pytest
+from scrapy.exceptions import DropItem
 from scrapy.utils.test import get_crawler
 
+from tests.conftest import AsyncClientShim, AsyncCollectionShim
 from wrc_pipeline.config import Settings
 from wrc_pipeline.constants import Body
 from wrc_pipeline.models import DocKind
 from wrc_pipeline.scraping.items import AttachmentItem, DocumentItem
 from wrc_pipeline.scraping.pipelines import HashingPipeline, PersistencePipeline
 from wrc_pipeline.scraping.spiders.decisions import DecisionsSpider
-from wrc_pipeline.storage.mongo import MetadataRepository, RunReportStore
+from wrc_pipeline.storage.mongo import AsyncMetadataRepository, AsyncRunReportStore
 from wrc_pipeline.storage.s3 import ObjectStore
 
 HTML_V1 = b'<html><body><div class="content">Decision text</div></body></html><!-- Elapsed time: 0.015 -->'
@@ -86,13 +89,17 @@ class TestHashingPipeline:
 
 @pytest.fixture
 def persistence(settings: Settings, s3_client) -> PersistencePipeline:
-    """PersistencePipeline wired to mongomock + moto instead of real services."""
+    """PersistencePipeline wired to mongomock (behind an async shim) + moto."""
     pipeline = PersistencePipeline(settings)
     client: mongomock.MongoClient = mongomock.MongoClient(tz_aware=True)
     database = client[settings.mongo.database]
-    pipeline._client = client
-    pipeline._landing = MetadataRepository(database[settings.mongo.landing_collection])
-    pipeline._runs = RunReportStore(database[settings.mongo.runs_collection])
+    pipeline._client = AsyncClientShim()  # type: ignore[assignment]
+    pipeline._landing = AsyncMetadataRepository(
+        AsyncCollectionShim(database[settings.mongo.landing_collection])  # type: ignore[arg-type]
+    )
+    pipeline._runs = AsyncRunReportStore(
+        AsyncCollectionShim(database[settings.mongo.runs_collection])  # type: ignore[arg-type]
+    )
     pipeline._store = ObjectStore(s3_client)
     pipeline._bucket = settings.object_store.landing_bucket
     pipeline._store.ensure_bucket(pipeline._bucket)
@@ -107,8 +114,9 @@ def stored_keys(s3_client, bucket: str) -> list[str]:
 
 class TestPersistencePipelineIdempotency:
     def process(self, persistence: PersistencePipeline, spider: DecisionsSpider, item) -> None:
+        """One item through both pipelines; the persistence step is a coroutine."""
         hashed = HashingPipeline().process_item(item, spider)
-        persistence.process_item(hashed, spider)
+        asyncio.run(persistence.process_item(hashed, spider))
 
     def test_first_run_uploads_and_upserts(
         self,
@@ -199,15 +207,52 @@ class TestPersistencePipelineIdempotency:
         assert record["attachments"][0]["content_type"] == "application/pdf"
 
 
+class TestPersistenceConcurrency:
+    def test_items_persist_concurrently_on_one_event_loop(
+        self, persistence: PersistencePipeline, spider: DecisionsSpider, settings: Settings
+    ) -> None:
+        """Scrapy awaits process_item for many items at once (CONCURRENT_ITEMS);
+        interleaved coroutines must each land their own record."""
+        hashing = HashingPipeline()
+        items = [
+            hashing.process_item(make_document_item(identifier=f"ADJ-{n:08d}"), spider)
+            for n in range(5)
+        ]
+
+        async def run_all() -> None:
+            await asyncio.gather(*(persistence.process_item(item, spider) for item in items))
+
+        asyncio.run(run_all())
+
+        collection = persistence._mongo_database[settings.mongo.landing_collection]
+        assert collection.count_documents({}) == 5
+        assert spider.crawler.stats.get_value("wrc/records_scraped") == 5
+
+    def test_storage_error_becomes_logged_failure_and_drop(
+        self, persistence: PersistencePipeline, spider: DecisionsSpider
+    ) -> None:
+        async def boom(record):
+            raise RuntimeError("mongo down")
+
+        persistence._landing.upsert_record = boom  # type: ignore[method-assign]
+        item = HashingPipeline().process_item(make_document_item(), spider)
+
+        with pytest.raises(DropItem):
+            asyncio.run(persistence.process_item(item, spider))
+
+        assert spider.failures[0]["reason"] == "persistence_error"
+        assert spider.failures[0]["identifier"] == "ADJ-00053864"
+
+
 class TestRunReport:
     def test_report_written_on_spider_close(
         self, persistence: PersistencePipeline, spider: DecisionsSpider, settings: Settings
     ) -> None:
         hashed = HashingPipeline().process_item(make_document_item(), spider)
-        persistence.process_item(hashed, spider)
+        asyncio.run(persistence.process_item(hashed, spider))
         spider.crawler.stats.inc_value("wrc/records_found", 192)
 
-        persistence._on_spider_closed(spider, reason="finished")
+        asyncio.run(persistence._on_spider_closed(spider, reason="finished"))
 
         report = persistence._mongo_database[settings.mongo.runs_collection].find_one(
             {"run_id": spider.run_id}

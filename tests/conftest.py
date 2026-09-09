@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import boto3
 import mongomock
@@ -48,6 +49,27 @@ def mongo_database(settings: Settings) -> mongomock.Database:
 def s3_client():
     with mock_aws():
         yield boto3.client("s3", region_name="us-east-1")
+
+
+class AsyncCollectionShim:
+    """mongomock is synchronous; expose the calls the async repositories await."""
+
+    def __init__(self, collection: mongomock.Collection) -> None:
+        self._collection = collection
+
+    async def find_one(self, *args: Any, **kwargs: Any) -> Any:
+        return self._collection.find_one(*args, **kwargs)
+
+    async def update_one(self, *args: Any, **kwargs: Any) -> Any:
+        return self._collection.update_one(*args, **kwargs)
+
+    async def create_index(self, *args: Any, **kwargs: Any) -> Any:
+        return self._collection.create_index(*args, **kwargs)
+
+
+class AsyncClientShim:
+    async def close(self) -> None:
+        return None
 
 
 def load_fixture(name: str) -> bytes:
