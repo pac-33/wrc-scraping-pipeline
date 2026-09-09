@@ -3,8 +3,11 @@
 Politeness model: AutoThrottle adapts the request rate to observed latency
 (and never speeds up after non-200s), DOWNLOAD_DELAY is its floor, and
 CONCURRENT_REQUESTS_PER_DOMAIN is the hard cap — adaptive in the middle,
-bounded on both ends. LOG_ENABLED=False stops Scrapy installing its own
-plain-text root handler; its loggers still propagate into our JSON handler.
+bounded on both ends. Retries are Scrapy's stock RetryMiddleware (RETRY_TIMES
+per request on 429/5xx and connection errors); exhausted retries reach the
+request's errback, and Dagster's RetryPolicy re-runs a failed partition.
+LOG_ENABLED=False stops Scrapy installing its own plain-text root handler;
+its loggers still propagate into our JSON handler.
 """
 
 import scrapy
@@ -37,11 +40,6 @@ AUTOTHROTTLE_MAX_DELAY = 60.0
 
 RETRY_ENABLED = True
 RETRY_TIMES = _settings.scraper.retry_times
-
-DOWNLOADER_MIDDLEWARES = {
-    "scrapy.downloadermiddlewares.retry.RetryMiddleware": None,
-    "wrc_pipeline.scraping.middlewares.RetryAfterBackoffMiddleware": 550,
-}
 
 ITEM_PIPELINES = {
     "wrc_pipeline.scraping.pipelines.HashingPipeline": 100,

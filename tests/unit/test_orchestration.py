@@ -79,8 +79,8 @@ class TestCrawlEvaluation:
 
         assert ok is False
 
-    def test_circuit_breaker_close_fails(self) -> None:
-        ok, metadata = evaluate(self.base_stats(), "circuit_breaker_tripped")
+    def test_non_finished_close_reason_fails(self) -> None:
+        ok, metadata = evaluate(self.base_stats(), "shutdown")
 
         assert ok is False
-        assert metadata["finish_reason"] == "circuit_breaker_tripped"
+        assert metadata["finish_reason"] == "shutdown"
